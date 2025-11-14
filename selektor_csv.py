@@ -9,6 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import numpy as np
 import subprocess, sys
+import json  # <--- DODANE do zapisywania ustawień
 
 APP_TITLE = "PriceBot"
 
@@ -79,6 +80,9 @@ class App(tk.Tk):
         self.margin_m2_var = tk.DoubleVar(value=5.0)                # okno +- m2
         self.margin_pct_var = tk.DoubleVar(value=0.0)               # okno +- % (jeśli >0, ma pierwszeństwo)
 
+        # wczytaj zapisane ustawienia (np. ostatni folder bazowy)
+        self._load_settings()
+
         # --- UI ---
         root = ttk.Frame(self, padding=10); root.pack(fill="both", expand=True)
 
@@ -98,6 +102,32 @@ class App(tk.Tk):
         row_db = ttk.Frame(group_db); row_db.pack(fill="x", padx=8, pady=6)
         ttk.Button(row_db, text="Baza danych", command=self.run_bazadanych).pack(side="left")
 
+        # ---------- FILTRY RAPORTU (NOWA SEKCJA) ----------
+        group_filters = ttk.LabelFrame(root, text="Filtry raportu")
+        group_filters.pack(fill="x", pady=(8, 0))
+
+        row_filters = ttk.Frame(group_filters)
+        row_filters.pack(fill="x", padx=8, pady=6)
+
+        ttk.Label(row_filters, text="Filtr:").pack(side="left")
+
+        self.filter_var = tk.StringVar(value="— brak —")
+        self.filter_box = ttk.Combobox(
+            row_filters,
+            textvariable=self.filter_var,
+            state="readonly",
+            width=40,
+            values=[
+                "— brak —",
+                "Jeden właściciel",
+                "Lokal mieszkalny",
+                "Jeden właściciel i Lokal mieszkalny",
+                "Cofnij",
+            ]
+        )
+        self.filter_box.pack(side="left", padx=10)
+        self.filter_box.bind("<<ComboboxSelected>>", self.run_filter_script)
+
         group_out = ttk.LabelFrame(root, text="Folder zapisu wyników"); group_out.pack(fill="x", pady=(8, 0))
         row_out = ttk.Frame(group_out); row_out.pack(fill="x", padx=8, pady=6)
         ttk.Entry(row_out, textvariable=self.output_folder_var).pack(side="left", fill="x", expand=True)
@@ -109,7 +139,7 @@ class App(tk.Tk):
         ttk.Label(row_ctrl1, text="Pomiary brzegowe metrażu:").pack(side="left")
         ttk.Label(row_ctrl1, text="± m²:").pack(side="left", padx=(8, 2))
         ttk.Spinbox(row_ctrl1, from_=0.0, to=200.0, increment=0.5, width=6, textvariable=self.margin_m2_var).pack(side="left")
-        ttk.Label(row_ctrl1, text="± %:").pack(side="left", padx=(12, 2))
+        ttk.Label(row_ctrl1, text="- %:").pack(side="left", padx=(12, 2))
         ttk.Spinbox(row_ctrl1, from_=0.0, to=100.0, increment=0.5, width=6, textvariable=self.margin_pct_var).pack(side="left")
 
         ttk.Button(row_ctrl1, text="‹ Poprzedni", command=self.prev_row).pack(side="left", padx=(16, 0))
@@ -120,6 +150,36 @@ class App(tk.Tk):
         group_preview = ttk.LabelFrame(root, text="Bieżący wiersz (podgląd)"); group_preview.pack(fill="both", expand=True, pady=(8, 0))
         self.preview_label = ttk.Label(group_preview, text="{Wybierz plik raportu}", anchor="w", justify="left")
         self.preview_label.pack(fill="both", expand=True, padx=8, pady=6)
+
+    # ---------- zapisywanie / wczytywanie ustawień ----------
+    def _settings_path(self) -> Path:
+        """Plik z ustawieniami obok selektor_csv.py."""
+        return Path(__file__).resolve().with_name("pricebot_settings.json")
+
+    def _load_settings(self):
+        try:
+            cfg_path = self._settings_path()
+            if cfg_path.exists():
+                with cfg_path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                base = data.get("base_folder") or ""
+                if base:
+                    self.folder_var.set(base)
+        except Exception:
+            # nie krzycz, jak coś pójdzie nie tak – po prostu użyj domyślnego
+            pass
+
+    def _save_settings(self):
+        try:
+            cfg_path = self._settings_path()
+            data = {
+                "base_folder": self.folder_var.get() or "",
+            }
+            with cfg_path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            # brak zapisu = brak pamiętania, ale aplikacja ma działać dalej
+            pass
 
     # ---------- uruchamianie zewnętrznych skryptów ----------
     def _run_script(self, candidates: list[str], extra_args: list[str] | None = None):
@@ -176,12 +236,16 @@ class App(tk.Tk):
 
     def choose_base_folder(self):
         d = filedialog.askdirectory(title="Wybierz folder bazowy", initialdir=self.folder_var.get())
-        if d: self.folder_var.set(d)
+        if d:
+            self.folder_var.set(d)
+            self._save_settings()  # <--- ZAPISUJEMY WYBÓR
 
     def prepare_app(self):
         base = Path(self.folder_var.get()).resolve()
         for p in ["linki", "województwa", "logs"]:
             (base / p).mkdir(parents=True, exist_ok=True)
+        # na wszelki wypadek też zapisz ustawienia po przygotowaniu
+        self._save_settings()
         messagebox.showinfo("Przygotowanie Aplikacji", f"Przygotowano strukturę w:\n{base}")
 
     def choose_output_folder(self):
@@ -199,6 +263,37 @@ class App(tk.Tk):
             messagebox.showerror("Baza danych", f"Nie mogę zaimportować bazadanych.py:\n{e}")
             return
         open_ui(root_dir, parent=self)
+
+    def run_filter_script(self, event=None):
+        """Uruchamia odpowiedni filtr po wyborze z listy, na AKTUALNYM pliku raportu."""
+        choice = self.filter_var.get()
+        report_path = self.input_file_var.get().strip()
+
+        if not report_path:
+            messagebox.showerror("Brak pliku", "Najpierw wybierz plik raportu (wejście).")
+            self.filter_var.set("— brak —")
+            return
+
+        mapping = {
+            "Jeden właściciel": ["jeden_właściciel.py", "jeden_wlasciciel.py"],
+            "Lokal mieszkalny": ["LOKAL_MIESZKALNY.py", "lokal_mieszkalny.py"],
+            "Jeden właściciel i Lokal mieszkalny": [
+                "jeden_właściciel_i_LOKAL_MIESZKALNY.py",
+                "jeden_wlasciciel_i_lokal_mieszkalny.py",
+            ],
+            "Cofnij": ["cofnij.py"],
+        }
+
+        if choice == "— brak —":
+            return
+
+        scripts = mapping.get(choice)
+        if not scripts:
+            messagebox.showerror("Błąd", f"Brak obsługi dla filtru: {choice}")
+            return
+
+        # każdy filtr działa na wybranym „Plik raportu (wejście)”
+        self._run_script(scripts, extra_args=["--in", report_path])
 
     def automate(self):
         """Uruchamia skrypt Automat.py (lub automat.py) — bez argumentów."""
